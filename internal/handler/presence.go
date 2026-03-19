@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 
 	"github.com/go-chi/chi/v5"
 
@@ -22,7 +23,7 @@ func NewPresenceHandler(svc *service.PresenceService) *PresenceHandler {
 
 // Heartbeat handles PUT /presence/{userID}.
 func (h *PresenceHandler) Heartbeat(w http.ResponseWriter, r *http.Request) {
-	userID := chi.URLParam(r, "userID")
+	userID, _ := url.PathUnescape(chi.URLParam(r, "userID"))
 	if userID == "" {
 		http.Error(w, "missing user ID", http.StatusBadRequest)
 		return
