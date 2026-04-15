@@ -1,29 +1,51 @@
 # Zyna Presence Server
 
-Lightweight presence tracking service for the [Zyna](https://github.com/markovsdima/Zyna/tree/develop) Matrix client. Tracks online/offline status and last seen time via heartbeat polling.
+Lightweight presence tracking service for the [Zyna](https://github.com/markovsdima/Zyna/tree/develop) Matrix client. Tracks online/offline status and last seen time over WebSocket.
 
 ## How it works
 
-Clients poll every ~10 seconds. Each heartbeat writes a timestamp to Redis with a short TTL (default 30s). When heartbeats stop, the key expires and the user is considered offline. A separate long-lived key (30 days) preserves the last seen timestamp for offline users.
+Clients exchange a Matrix access token for a short-lived JWT via REST, then open a persistent WebSocket connection. The server tracks which users are online in memory with multi-device support: a user is "online" when at least one device is connected and "offline" when the last device disconnects. Subscribers receive real-time presence updates. Last seen timestamps are persisted to a JSON file.
 
 ## API
 
+### REST
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `PUT` | `/presence/{userID}` | Send heartbeat (marks user online) |
-| `POST` | `/presence/status` | Batch query status for up to 200 users |
-| `GET` | `/health` | Health check (no auth required) |
+| `POST` | `/presence/auth` | Exchange Matrix token for JWT |
+| `GET` | `/health` | Health check |
 
-All endpoints except `/health` require an `X-API-Key` header (HMAC-SHA256 of today's UTC date).
+### WebSocket
+
+Connect to `/presence/ws`, then authenticate with the JWT as the first message.
+
+**Client -> Server:**
+
+| Type | Description |
+|------|-------------|
+| `auth` | Authenticate or refresh JWT: `{type: "auth", token: "..."}` |
+| `subscribe` | Subscribe to users (max 200): `{type: "subscribe", user_ids: [...]}` |
+| `ping` | Heartbeat to keep connection alive |
+
+**Server -> Client:**
+
+| Type | Description |
+|------|-------------|
+| `presence` | Status change: `{type: "presence", user_id: "...", online: bool, last_seen?: timestamp}` |
+| `statuses` | Initial statuses after subscribe: `{type: "statuses", users: [...]}` |
+| `token_expired` | JWT expired, client should re-auth |
+| `error` | Error message |
 
 ## Quick start
 
 ```bash
-# Start Redis
-brew services start redis
+JWT_SECRET=your-secret-at-least-32-chars-long go run ./cmd/server
+```
 
-# Run the server
-HMAC_SECRET=your-secret-here go run ./cmd/server
+Dev mode (no Synapse needed):
+
+```bash
+AUTH_MODE=dev DEV_PASSWORD=secret JWT_SECRET=your-secret-at-least-32-chars-long go run ./cmd/server
 ```
 
 ## Configuration
@@ -31,31 +53,31 @@ HMAC_SECRET=your-secret-here go run ./cmd/server
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8080` | Server port |
-| `REDIS_ADDR` | `localhost:6379` | Redis address |
-| `REDIS_PASSWORD` | | Redis password |
-| `REDIS_DB` | `0` | Redis database number |
-| `PRESENCE_TTL` | `30s` | How long a heartbeat keeps user online |
-| `HMAC_SECRET` | | **Required.** Shared secret for API key generation |
-| `RATE_LIMIT_IP` | `60` | Max requests per minute per IP |
-| `RATE_LIMIT_HEARTBEAT` | `5s` | Min interval between heartbeats per user |
+| `JWT_SECRET` | | **Required.** Signing key for JWT (min 32 chars) |
+| `SYNAPSE_URL` | `http://localhost:8008` | Matrix homeserver URL |
+| `LAST_SEEN_FILE` | `last_seen.json` | File for persisting last seen timestamps |
+| `AUTH_MODE` | `synapse` | `synapse` or `dev` |
+| `DEV_PASSWORD` | | Required when `AUTH_MODE=dev` |
 
 ## Project structure
 
 ```
-cmd/server/main.go           - Entry point
+cmd/server/main.go              - Entry point, routing, graceful shutdown
 internal/
-  config/config.go           - Configuration from ENV
-  handler/presence.go        - HTTP handlers
-  service/presence.go        - Business logic
-  storage/redis.go           - PresenceStore interface + Redis implementation
-  middleware/hmac.go          - HMAC-based API key verification
-  middleware/ratelimit.go     - Rate limiting (by IP + by user)
+  config/config.go              - Configuration from ENV
+  auth/jwt.go                   - JWT generation and validation
+  auth/synapse.go               - Matrix homeserver token verification
+  handler/auth.go               - POST /presence/auth + rate limiting
+  handler/health.go             - GET /health
+  presence/tracker.go           - In-memory presence tracking, subscriptions, broadcast
+  presence/store.go             - Last seen persistence (JSON file)
+  ws/handler.go                 - WebSocket lifecycle, auth, read loop
 ```
 
 ## Tech stack
 
 - Go 1.22+
-- Redis
+- [coder/websocket](https://github.com/coder/websocket) for WebSocket
 - [chi](https://github.com/go-chi/chi) for routing
-- [go-redis](https://github.com/redis/go-redis) for Redis
+- [golang-jwt](https://github.com/golang-jwt/jwt) for JWT
 - `log/slog` for structured logging
