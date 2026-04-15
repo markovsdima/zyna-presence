@@ -3,56 +3,36 @@ package config
 import (
 	"fmt"
 	"os"
-	"strconv"
-	"time"
 )
 
+// Config holds all server configuration.
 type Config struct {
-	Port               string
-	RedisAddr          string
-	RedisPassword      string
-	RedisDB            int
-	PresenceTTL        time.Duration
-	HMACSecret         string
-	RateLimitIP        int
-	RateLimitHeartbeat time.Duration
+	Port         string
+	JWTSecret    string
+	SynapseURL   string
+	LastSeenFile string
+	AuthMode     string // "synapse" (default) or "dev"
+	DevPassword  string // only used when AuthMode == "dev"
 }
 
+// Load reads configuration from environment variables.
 func Load() (*Config, error) {
 	cfg := &Config{
-		Port:               envOr("PORT", "8080"),
-		RedisAddr:          envOr("REDIS_ADDR", "localhost:6379"),
-		RedisPassword:      os.Getenv("REDIS_PASSWORD"),
-		HMACSecret:         os.Getenv("HMAC_SECRET"),
+		Port:         envOr("PORT", "8080"),
+		SynapseURL:   envOr("SYNAPSE_URL", "http://localhost:8008"),
+		LastSeenFile: envOr("LAST_SEEN_FILE", "last_seen.json"),
+		JWTSecret:    os.Getenv("JWT_SECRET"),
+		AuthMode:     envOr("AUTH_MODE", "synapse"),
+		DevPassword:  os.Getenv("DEV_PASSWORD"),
 	}
 
-	if cfg.HMACSecret == "" {
-		return nil, fmt.Errorf("HMAC_SECRET is required")
+	if len(cfg.JWTSecret) < 32 {
+		return nil, fmt.Errorf("JWT_SECRET must be at least 32 characters")
 	}
 
-	redisDB, err := strconv.Atoi(envOr("REDIS_DB", "0"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid REDIS_DB: %w", err)
+	if cfg.AuthMode == "dev" && cfg.DevPassword == "" {
+		return nil, fmt.Errorf("DEV_PASSWORD is required when AUTH_MODE=dev")
 	}
-	cfg.RedisDB = redisDB
-
-	ttl, err := time.ParseDuration(envOr("PRESENCE_TTL", "30s"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid PRESENCE_TTL: %w", err)
-	}
-	cfg.PresenceTTL = ttl
-
-	rateLimitIP, err := strconv.Atoi(envOr("RATE_LIMIT_IP", "60"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid RATE_LIMIT_IP: %w", err)
-	}
-	cfg.RateLimitIP = rateLimitIP
-
-	heartbeatInterval, err := time.ParseDuration(envOr("RATE_LIMIT_HEARTBEAT", "5s"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid RATE_LIMIT_HEARTBEAT: %w", err)
-	}
-	cfg.RateLimitHeartbeat = heartbeatInterval
 
 	return cfg, nil
 }
