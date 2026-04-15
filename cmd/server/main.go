@@ -11,13 +11,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
-	"github.com/redis/go-redis/v9"
 
+	"github.com/markovsdima/zyna-presence/internal/auth"
 	"github.com/markovsdima/zyna-presence/internal/config"
 	"github.com/markovsdima/zyna-presence/internal/handler"
-	"github.com/markovsdima/zyna-presence/internal/middleware"
-	"github.com/markovsdima/zyna-presence/internal/service"
-	"github.com/markovsdima/zyna-presence/internal/storage"
+	"github.com/markovsdima/zyna-presence/internal/presence"
+	"github.com/markovsdima/zyna-presence/internal/ws"
 )
 
 func main() {
@@ -29,61 +28,55 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Redis client
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     cfg.RedisAddr,
-		Password: cfg.RedisPassword,
-		DB:       cfg.RedisDB,
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		slog.Error("failed to connect to Redis", "error", err)
+	// Last-seen store.
+	store, err := presence.NewStore(cfg.LastSeenFile)
+	if err != nil {
+		slog.Error("failed to load last_seen store", "error", err)
 		os.Exit(1)
 	}
 
-	// Layers
-	store := storage.NewRedisStore(rdb)
-	svc := service.NewPresenceService(store, cfg.PresenceTTL)
-	h := handler.NewPresenceHandler(svc)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go store.StartPeriodicFlush(ctx, time.Minute)
 
-	// Router
+	// Presence tracker.
+	tracker := presence.NewTracker(store)
+
+	// Auth.
+	var authHandler *handler.AuthHandler
+	if cfg.AuthMode == "dev" {
+		slog.Warn("running in dev auth mode — do not use in production")
+		authHandler = handler.NewDevAuthHandler(cfg.JWTSecret, cfg.DevPassword)
+	} else {
+		synapse := auth.NewSynapseClient(cfg.SynapseURL)
+		authHandler = handler.NewAuthHandler(synapse, cfg.JWTSecret)
+	}
+	wsHandler := ws.NewHandler(tracker, cfg.JWTSecret)
+
+	// Router.
 	r := chi.NewRouter()
-
-	// Global middleware
 	r.Use(chimw.Recoverer)
 
-	// Health check — no auth or rate limiting (for probes)
 	r.Get("/health", handler.Health)
+	r.Post("/presence/auth", authHandler.ServeHTTP)
+	r.Get("/presence/ws", wsHandler.ServeHTTP)
 
-	// Authenticated routes: HMAC → IP rate limit → handlers
-	r.Group(func(r chi.Router) {
-		r.Use(middleware.HMACAuth(cfg.HMACSecret))
-		r.Use(middleware.IPRateLimit(store, cfg.RateLimitIP))
-
-		r.Route("/presence", func(r chi.Router) {
-			r.With(middleware.UserHeartbeatRateLimit(store, cfg.RateLimitHeartbeat)).
-				Put("/{userID}", h.Heartbeat)
-			r.Post("/status", h.BatchStatus)
-		})
-	})
-
-	// Server
+	// Server — no ReadTimeout/WriteTimeout for long-lived WebSocket connections.
 	srv := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      r,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              ":" + cfg.Port,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
-	// Graceful shutdown
+	// Graceful shutdown.
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		sig := <-sigCh
 		slog.Info("shutting down", "signal", sig.String())
+
+		cancel() // stops periodic flush, triggers final flush
 
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
@@ -95,6 +88,7 @@ func main() {
 	slog.Info("starting server", "port", cfg.Port)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server error", "error", err)
+		store.Flush()
 		os.Exit(1)
 	}
 	slog.Info("server stopped")
