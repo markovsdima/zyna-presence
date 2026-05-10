@@ -48,6 +48,30 @@ Dev mode (no Synapse needed):
 AUTH_MODE=dev DEV_PASSWORD=secret JWT_SECRET=your-secret-at-least-32-chars-long go run ./cmd/server
 ```
 
+## Docker
+
+Build the image:
+
+```bash
+docker build -t zyna-presence:local .
+```
+
+Run it as a standalone container:
+
+```bash
+docker volume create zyna-presence-data
+docker run --rm --name zyna-presence \
+  -p 8080:8080 \
+  -e JWT_SECRET=your-secret-at-least-32-chars-long \
+  -e SYNAPSE_URL=http://host.docker.internal:8008 \
+  -v zyna-presence-data:/data \
+  zyna-presence:local
+```
+
+The image runs as a non-root user, listens on `PORT` (`8080` by default), and stores presence data at `/data/last_seen.json`. Mount `/data` as a volume in Docker Compose so `last_seen` data survives container recreation.
+
+When Synapse runs in the same Docker Compose project, set `SYNAPSE_URL` to the Synapse service name, for example `http://synapse:8008`. When Synapse runs directly on the host, use the host address reachable from Docker, such as `http://host.docker.internal:8008` on Docker Desktop.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -55,7 +79,7 @@ AUTH_MODE=dev DEV_PASSWORD=secret JWT_SECRET=your-secret-at-least-32-chars-long 
 | `PORT` | `8080` | Server port |
 | `JWT_SECRET` | | **Required.** Signing key for JWT (min 32 chars) |
 | `SYNAPSE_URL` | `http://localhost:8008` | Matrix homeserver URL |
-| `LAST_SEEN_FILE` | `last_seen.json` | File for persisting last seen timestamps |
+| `LAST_SEEN_FILE` | `last_seen.json` | File for persisting last seen timestamps. The Docker image sets `/data/last_seen.json` |
 | `AUTH_MODE` | `synapse` | `synapse` or `dev` |
 | `DEV_PASSWORD` | | Required when `AUTH_MODE=dev` |
 
